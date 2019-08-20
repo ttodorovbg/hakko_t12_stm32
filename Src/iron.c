@@ -46,12 +46,14 @@ volatile bool  	  iron_connected 	= 0;				// Flag indication the IRON is connect
 volatile uint32_t temp 				= 0;				// The Exponential average value of the IRON temperature (0-4095)
 volatile uint32_t temp_disp			= 0;				// The temperature math dispersion
 volatile uint32_t ambient			= 0;				// The Exponential average value of the ambient temperature
+volatile bool	  vibro_switch	    = 1;				// The vibration switch: whether the IRON is used
+
 /*
  * The exponential sum values and coefficients for the average values:
- * 		current, IRON temp., ambient temp., IRON temp. dispersion
+ * 		current, IRON temp., ambient temp., IRON temp. dispersion, vibration_switch
  */
-static   uint32_t emp_summ[4] 		= { 0,  0,  0,  0 };
-static   uint8_t  emp_k[4] 			= { 4, 50, 50, 50 };
+static   uint32_t emp_summ[5] 		= { 0,  0,  0,  0 , 0 };
+static   uint8_t  emp_k[5] 			= { 4, 50, 50, 50 , 10};
 
 static uint16_t	IRON_power(uint32_t temp);
 
@@ -95,6 +97,20 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 		if (TIM2->CCR1 < 100) {							// If the IRON is switched off
 			TIM2->CCR1 = 100;							// Switch it on to check the iron connectivity
 		}
+	}
+	if (iron_connected) {
+		// Check the status of the vibro switch
+		uint16_t vibro_sw 	= 100;
+		if (HAL_GPIO_ReadPin(VIBRO_SW_GPIO_Port, VIBRO_SW_Pin) == GPIO_PIN_RESET)
+			vibro_sw = 0;
+		vibro_sw = empAverage(&emp_summ[4], emp_k[4], vibro_sw);
+		if (vibro_switch && vibro_sw > 60) {
+			vibro_switch = 0;
+		} else if (!vibro_switch && vibro_sw < 40) {
+			vibro_switch = 1;
+		}
+	} else {
+		vibro_switch = 0;
 	}
 }
 
@@ -154,12 +170,10 @@ int32_t PID_change(uint8_t p, int32_t k) {
 static int32_t PID_requiredPower(int16_t temp_set, int16_t temp_curr) {
 	if (pid.temp_h0 == 0) {
 		// When the temperature is near the preset one, reset the PID and prepare iterative formulae
-		if ((temp_set - temp_curr) < 30) {
-			if (!pid.pid_iterate) {
-				pid.pid_iterate = true;
-				pid.power 		= 0;
-				pid.i_summ 		= 0;
-			}
+		if (!pid.pid_iterate && (temp_set - temp_curr) < 30) {
+			pid.pid_iterate = true;
+			pid.power 		= 0;
+			pid.i_summ 		= 0;
 		}
 		pid.i_summ += temp_set - temp_curr;				// first, use the direct formulae, not the iterate process
 		pid.power = pid.Kp*(temp_set - temp_curr) + pid.Ki * pid.i_summ;
@@ -172,9 +186,9 @@ static int32_t PID_requiredPower(int16_t temp_set, int16_t temp_curr) {
 	}
 	if (pid.pid_iterate) pid.temp_h0 = pid.temp_h1;
 	pid.temp_h1 = temp_curr;
-	// prepare the power to delete by denominator, round the result
+	// prepare the power to divide by denominator, round the result
 	int32_t pwr = pid.power + (1 << (pid.denominator_p-1));
-	pwr >>= pid.denominator_p;							// delete by the denominator
+	pwr >>= pid.denominator_p;							// divide by the denominator
 	return pwr;
 }
 
@@ -255,6 +269,10 @@ bool	IRON_connected(void) {
 
 bool	IRON_isON(void) {
 	return iron.on;
+}
+
+bool	IRON_vibroSwitch(void) {
+	return vibro_switch;
 }
 
 static uint16_t IRON_power(uint32_t t) {
